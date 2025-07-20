@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Breakout Arcade (Stile Wozniak/Jobs) – HTML5</title>
+<meta name="description" content="Versione HTML5/CSS/JS di Breakout ispirata all'implementazione Atari, con controlli tastiera e touch." />
+<style>
+ :root {
+  --bg: #000014; /* blu molto scuro stile vecchi monitor */
+  --fg: #e0e0e0;
+  --accent: #ffcc00;
+  --paddle: #ff8c00;
+  --ball: #ffffff;
+  --font: 'Press Start 2P', monospace;
+ }
+ html,body{margin:0;padding:0;width:100%;height:100%;background:var(--bg);color:var(--fg);font-family:var(--font);}
+ body{display:flex;flex-direction:column;}
+ header{padding:8px 12px;font-size:12px;letter-spacing:1px;display:flex;gap:18px;flex-wrap:wrap;align-items:center;background:#050520;border-bottom:1px solid #1a1a3a;}
+ header span.label{color:#888;}
+ #game-wrapper{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:10px;position:relative;}
+ canvas{background:#000010;box-shadow:0 0 12px #081840,0 0 4px #000 inset;border:2px solid #202050;touch-action:none;max-width:100%;height:auto;image-rendering:pixelated;}
+ #hud{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;gap:24px;font-size:12px;letter-spacing:1px;text-shadow:0 0 4px #000;}
+ #messages{margin-top:10px;font-size:13px;min-height:24px;text-align:center;}
+ button{background:#202060;color:var(--fg);border:1px solid #404090;padding:6px 12px;font-family:var(--font);font-size:11px;cursor:pointer;letter-spacing:1px;border-radius:4px;}
+ button:hover{background:#2c2c80;}
+ .pulse{animation:pulse 1.4s infinite;}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+ .touch-hint{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);font-size:10px;color:#66d2ff;opacity:.75;pointer-events:none;}
+ .hidden{display:none !important;}
+ footer{padding:6px 10px;font-size:10px;text-align:center;color:#666;background:#040414;border-top:1px solid #1a1a3a;}
+ a{color:#66d2ff;text-decoration:none;} a:hover{text-decoration:underline;}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+</head>
+<body>
+<header>
+  <strong>BREAKOUT</strong>
+  <span class="label">Ispirato all'originale Atari (Wozniak/Jobs)</span>
+  <button id="btnStart">START</button>
+  <button id="btnPause">PAUSA</button>
+  <button id="btnReset">RESET</button>
+</header>
+<div id="game-wrapper">
+  <div id="hud">
+    <div>VITE: <span id="lives">3</span></div>
+    <div>PUNTEGGIO: <span id="score">0</span></div>
+    <div>LIVELLO: <span id="level">1</span></div>
+  </div>
+  <canvas id="game" width="480" height="640" aria-label="Canvas Breakout" role="img"></canvas>
+  <div id="messages" class="pulse"></div>
+  <div class="touch-hint" id="touchHint">Tocca e trascina per muovere la barra</div>
+</div>
+<footer>Codice demo HTML5 + Canvas. Controlli: Frecce &larr; &rarr; o Touch. P per pausa. © 2025</footer>
+<script>
+/****************************************************
+ * Breakout Arcade – HTML5 Implementation
+ * Caratteristiche:
+ *  - Layout scalabile (canvas ridimensionato mantenendo ratio)
+ *  - Controlli: frecce tastiera, P per pausa, touch drag
+ *  - Livelli progressivi: aumenta velocità e genera nuova griglia
+ *  - Collisioni precise con correzione penetrazione
+ *  - Effetti: flash su impatto mattone, suono sintetizzato Web Audio
+ ****************************************************/
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+const messages = document.getElementById('messages');
+const livesEl = document.getElementById('lives');
+const scoreEl = document.getElementById('score');
+const levelEl = document.getElementById('level');
+const btnStart = document.getElementById('btnStart');
+const btnPause = document.getElementById('btnPause');
+const btnReset = document.getElementById('btnReset');
+const touchHint = document.getElementById('touchHint');
+
+let W = cvs.width; let H = cvs.height;
+
+// GAME STATE
+let running = false;
+let paused = false;
+let level = 1;
+let score = 0;
+let lives = 3;
+let bricks = [];
+let paddle, ball;
+let lastTime = 0;
+let audioCtx=null;
+
+function ensureAudio(){ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
+function beep(f=440,d=0.08,v=0.25,type='square'){
+  try{ensureAudio(); const o=audioCtx.createOscillator(); const g=audioCtx.createGain(); o.type=type; o.frequency.value=f; g.gain.value=v; o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+d); g.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+d); }catch(e){}
+}
+
+class Paddle{ constructor(){ this.w=90; this.h=14; this.x=(W-this.w)/2; this.y=H-40; this.speed=420; this.move=0; }
+  update(dt){ this.x+=this.move*this.speed*dt; this.x=Math.max(0, Math.min(W-this.w,this.x)); }
+  draw(){ ctx.fillStyle='#ff8c00'; ctx.fillRect(this.x,this.y,this.w,this.h); }
+}
+class Ball{ constructor(){ this.reset(); }
+  reset(){ this.r=8; this.x=W/2; this.y=H-60; const angle= (Math.random()*0.6 + 0.7) * Math.PI; // verso alto random
+    const speed=230 + (level-1)*30; this.vx = Math.cos(angle)*speed; this.vy = Math.sin(angle)*speed; }
+  update(dt){ this.x+=this.vx*dt; this.y+=this.vy*dt; // muri
+    if(this.x<this.r){ this.x=this.r; this.vx*=-1; beep(260); }
+    if(this.x>W-this.r){ this.x=W-this.r; this.vx*=-1; beep(260); }
+    if(this.y<this.r){ this.y=this.r; this.vy*=-1; beep(220); }
+    if(this.y>H+40){ loseLife(); }
+    // paddle collision
+    if(this.y+this.r>=paddle.y && this.y+this.r<=paddle.y+paddle.h && this.x>=paddle.x && this.x<=paddle.x+paddle.w && this.vy>0){
+      this.y = paddle.y - this.r; // reposition
+      const hitPos = (this.x - (paddle.x + paddle.w/2)) / (paddle.w/2); // -1..1
+      const maxBounce = 75 * Math.PI/180; // 75°
+      const angle = -Math.PI/2 + hitPos * maxBounce;
+      const speed = Math.sqrt(this.vx*this.vx + this.vy*this.vy) * 1.02; // leggero incremento
+      this.vx = Math.cos(angle)*speed;
+      this.vy = Math.sin(angle)*speed;
+      beep(520,0.05,0.18,'square');
+    }
+    // bricks
+    for(let b of bricks){ if(!b.alive) continue; if(this.x+this.r < b.x || this.x - this.r > b.x + b.w || this.y + this.r < b.y || this.y - this.r > b.y + b.h) continue; // overlap
+      // semplice side detection
+      const overlapL = (this.x + this.r) - b.x;
+      const overlapR = (b.x + b.w) - (this.x - this.r);
+      const overlapT = (this.y + this.r) - b.y;
+      const overlapB = (b.y + b.h) - (this.y - this.r);
+      const minOverlap = Math.min(overlapL,overlapR,overlapT,overlapB);
+      if(minOverlap === overlapL){ this.x = b.x - this.r; this.vx *= -1; }
+      else if(minOverlap === overlapR){ this.x = b.x + b.w + this.r; this.vx *= -1; }
+      else if(minOverlap === overlapT){ this.y = b.y - this.r; this.vy *= -1; }
+      else { this.y = b.y + b.h + this.r; this.vy *= -1; }
+      b.alive=false; score += 10; updateHUD(); beep(700,0.06,0.22,'sawtooth');
+      b.flashTime=0.15; break; }
+  }
+  draw(){ ctx.fillStyle='#ffffff'; ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2); ctx.fill(); }
+}
+class Brick{ constructor(x,y,w,h,color){ this.x=x; this.y=y; this.w=w; this.h=h; this.color=color; this.alive=true; this.flashTime=0; }
+  draw(){ if(!this.alive && this.flashTime<=0) return; ctx.save(); if(this.flashTime>0){ ctx.globalAlpha=Math.max(0,this.flashTime/0.15); }
+    ctx.fillStyle=this.color; ctx.fillRect(this.x,this.y,this.w,this.h); ctx.restore(); }
+}
+
+function buildLevel(){ bricks=[]; const rows = 6 + Math.min(4, level); const cols = 10; const marginTop=70; const bw = (W - 60)/cols; const bh=18; const palette=[ '#ff5f56', '#ffbd2e', '#27c93f', '#00bcd4', '#ab47bc', '#ff9800', '#ffc107'];
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const x=30 + c*bw; const y=marginTop + r*(bh+6);
+      bricks.push(new Brick(x,y,bw-4,bh,palette[(r+c)%palette.length]));
+    }
+  }
+}
+
+function resetBallAndPaddle(){ paddle=new Paddle(); ball=new Ball(); }
+function loseLife(){ lives--; updateHUD(); beep(120,0.3,0.3,'triangle'); if(lives<=0){ gameOver(); } else { resetBallAndPaddle(); paused=true; showMessage('Per continuare premi START / FRECCIA DESTRA'); }
+}
+function gameOver(){ running=false; paused=true; showMessage('GAME OVER - Punteggio: '+score+' (RESET per ricominciare)'); }
+function nextLevel(){ level++; updateHUD(); buildLevel(); resetBallAndPaddle(); paused=true; showMessage('LIVELLO '+level+' - Premi START'); beep(880,0.12); beep(1040,0.12,0.25,'square'); }
+
+function updateHUD(){ livesEl.textContent=lives; scoreEl.textContent=score; levelEl.textContent=level; }
+function showMessage(msg){ messages.textContent=msg; messages.classList.toggle('pulse', !!msg); }
+
+function init(){ level=1; score=0; lives=3; updateHUD(); buildLevel(); resetBallAndPaddle(); paused=true; running=true; showMessage('PREMI START O FRECCIA DESTRA'); detectTouch(); }
+
+function detectTouch(){ const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints>0; touchHint.classList.toggle('hidden', !isTouch); }
+
+// INPUT
+const keys={};
+window.addEventListener('keydown',e=>{ if(e.key==='ArrowLeft') { keys.left=true; } if(e.key==='ArrowRight'){ keys.right=true; } if(e.key==='p' || e.key==='P'){ togglePause(); } if(e.key===' ' && !running){ init(); }
+  if(e.key==='ArrowRight' && paused && running){ paused=false; showMessage(''); }
+});
+window.addEventListener('keyup',e=>{ if(e.key==='ArrowLeft') keys.left=false; if(e.key==='ArrowRight') keys.right=false; });
+
+let touchActive=false;
+let touchId=null;
+function handleTouch(e){ const rect=cvs.getBoundingClientRect(); for(const t of e.changedTouches){ if(touchId===null){ touchId=t.identifier; } if(t.identifier===touchId){ const x = (t.clientX - rect.left) * (W/rect.width); paddle.x = x - paddle.w/2; paddle.x=Math.max(0,Math.min(W-paddle.w,paddle.x)); } }
+  e.preventDefault(); }
+['touchstart','touchmove'].forEach(ev=>cvs.addEventListener(ev,handleTouch,{passive:false}));
+window.addEventListener('touchend',e=>{ for(const t of e.changedTouches){ if(t.identifier===touchId){ touchId=null; } } });
+
+function togglePause(){ if(!running) return; paused=!paused; showMessage(paused?'PAUSA':''); }
+btnPause.addEventListener('click',togglePause);
+btnStart.addEventListener('click',()=>{ if(!running){ init(); paused=false; showMessage(''); return; } if(paused){ paused=false; showMessage(''); }
+});
+btnReset.addEventListener('click',()=>{ init(); });
+
+function update(dt){ if(!running||paused) return; // paddle movement
+  paddle.move = (keys.left?-1:0) + (keys.right?1:0);
+  paddle.update(dt);
+  ball.update(dt);
+  // aggiorna flash bricks
+  let aliveCount=0; for(const b of bricks){ if(b.alive) aliveCount++; if(b.flashTime>0){ b.flashTime-=dt; } }
+  if(aliveCount===0){ nextLevel(); }
+}
+function render(){ ctx.clearRect(0,0,W,H); // draw bricks
+  bricks.forEach(b=>b.draw());
+  paddle.draw(); ball.draw();
+  // bordo retro
+  ctx.strokeStyle='#303070'; ctx.strokeRect(0.5,0.5,W-1,H-1);
+}
+function loop(ts){ const dt = (ts-lastTime)/1000; lastTime=ts; update(dt); render(); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+
+// Responsive scaling (keep aspect ratio)
+function resizeCanvas(){ const wrapper=document.getElementById('game-wrapper'); const maxH=wrapper.clientHeight-20; const scale=Math.min(wrapper.clientWidth/W, maxH/H, 1); cvs.style.width=(W*scale)+'px'; }
+window.addEventListener('resize',resizeCanvas); resizeCanvas();
+
+init();
+</script>
+</body>
+</html>
